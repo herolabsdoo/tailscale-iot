@@ -1,0 +1,38 @@
+diff --git a/wgengine/magicsock/derp.go b/wgengine/magicsock/derp.go
+index 214c61f..58eca46 100644
+--- a/wgengine/magicsock/derp.go
++++ b/wgengine/magicsock/derp.go
+@@ -555,7 +555,8 @@ func (c *Conn) runDerpReader(ctx context.Context, regionID int, dc *derphttp.Cli
+ 	// peerPresent is the set of senders we know are present on this
+ 	// connection, based on messages we've received from the server.
+ 	peerPresent := map[key.NodePublic]bool{}
+-	bo := backoff.NewBackoff(fmt.Sprintf("derp-%d", regionID), c.logf, 5*time.Second)
++	// tailscale-iot: up to 60 s (was 5), a reconnect every 5 s on 2G is the storm.
++	bo := backoff.NewBackoff(fmt.Sprintf("derp-%d", regionID), c.logf, 60*time.Second)
+ 	var lastPacketTime time.Time
+ 	var lastPacketSrc key.NodePublic
+ 
+@@ -583,9 +584,7 @@ func (c *Conn) runDerpReader(ctx context.Context, regionID int, dc *derphttp.Cli
+ 
+ 			c.logf("magicsock: [%p] derp.Recv(derp-%d): %v", dc, regionID, err)
+ 
+-			// If our DERP connection broke, it might be because our network
+-			// conditions changed. Start that check.
+-			c.ReSTUN("derp-recv-error")
++			// tailscale-iot: no ReSTUN on a broken DERP connection; link changes trigger their own.
+ 
+ 			// Back off a bit before reconnecting.
+ 			bo.BackOff(ctx, err)
+diff --git a/wgengine/magicsock/magicsock.go b/wgengine/magicsock/magicsock.go
+index 16e988c..657d998 100644
+--- a/wgengine/magicsock/magicsock.go
++++ b/wgengine/magicsock/magicsock.go
+@@ -1050,6 +1050,8 @@ func (c *Conn) updateNetInfo(ctx context.Context) (*netcheck.Report, error) {
+ 		// the exact same state in two different places.
+ 		GetLastDERPActivity: c.health.GetDERPRegionReceivedTime,
+ 		OnlyTCP443:          c.onlyTCP443.Load(),
++		// tailscale-iot: STUN only; the ICMP/HTTPS fallbacks are TLS handshakes for nothing on 2G.
++		OnlySTUN: !c.onlyTCP443.Load(),
+ 	})
+ 	if err != nil {
+ 		return nil, err

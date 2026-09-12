@@ -1,0 +1,73 @@
+#!/bin/bash
+# ./build [target ...]   the pinned upstream tree + patches/, compiled per target
+#
+#   tailscale/armv6      tailscaled, linux/arm GOARM=5 (ARM11-class SoCs without an FPU)
+#   tailscale/mipsle     tailscaled, linux/mipsle GOMIPS=softfloat (MIPS32 SoCs without an FPU)
+#   tailscale/amd64      tailscaled, linux/amd64
+#   headscale/amd64      headscale, linux/amd64
+#
+# Default: all four. targets/<program>/VERSION is the upstream release (tag v<VERSION> of the
+# <program>/ submodule); patches/<program>/*.patch are applied to an export of that tag in work/,
+# and the binary lands in targets/<program>/<arch>/ (gitignored).
+#
+# tailscale is built with its own toolchain (tool/go fetches the pinned Go into ~/.cache/tsgo) at
+# the extra-small feature set plus: osrouter (kernel tun + netfilter), iptables (hosts still on
+# iptables), debug (`tailscale debug rebind` / `restun`, used by watchdogs), sdnotify (systemd
+# Type=notify units), bakedroots (hosts with an outdated CA store), unixsocketidentity,
+# clientmetrics (`tailscale debug metrics`), ipnbus (without it `tailscale up --authkey` returns
+# before sending anything). The CLI is inside tailscaled; `tailscale` is a symlink to it.
+#
+# headscale is built with the stock Go its go.mod names (fetched into work/go/ once): tailscale's
+# fork sets a build tag that makes headscale's tailscale.com dependency refuse to start. Built
+# from a clone, not an export, so Go stamps the version: `headscale version` = v<VERSION>+dirty.
+set -e
+shopt -s nullglob   # no patches = nothing to apply, not a failed redirect
+D=$(cd "$(dirname "$0")" && pwd)
+FEATURES=osrouter,iptables,debug,sdnotify,bakedroots,unixsocketidentity,clientmetrics,ipnbus
+
+build_tailscale() {   # <arch> <GOARCH> <cpu flags>
+	local ver src tags out
+	ver=$(cat "$D/targets/tailscale/VERSION"); src=$D/work/tailscale-$1; out=$D/targets/tailscale/$1
+	echo "--- tailscale/$1: tailscale $ver, linux/$2"
+	rm -rf "$src" && mkdir -p "$src" "$out"
+	git -C "$D/tailscale" archive "v$ver" | tar x -C "$src"
+	for p in "$D"/patches/tailscale/*.patch; do patch -s -p1 -d "$src" < "$p"; done
+	tags="$(cd "$src" && ./tool/go run ./cmd/featuretags --min --add=$FEATURES),ts_include_cli"
+	(cd "$src" && env CGO_ENABLED=0 GOOS=linux GOARCH=$2 $3 ./tool/go build -tags="$tags" -trimpath -buildvcs=false \
+		-ldflags "-w -s -X tailscale.com/version.longStamp=$ver -X tailscale.com/version.shortStamp=$ver" \
+		-o "$out/tailscaled" ./cmd/tailscaled)
+	ln -sfn tailscaled "$out/tailscale"
+	sha256sum "$out/tailscaled"; du -h "$out/tailscaled" | cut -f1
+}
+
+build_headscale() {   # <arch> <GOARCH>
+	local ver src out gover go
+	ver=$(cat "$D/targets/headscale/VERSION"); src=$D/work/headscale-$1; out=$D/targets/headscale/$1
+	gover=$(git -C "$D/headscale" show "v$ver:go.mod" | sed -n 's/^go \([0-9.]*\)$/\1/p')
+	[ -n "$gover" ] || { echo "headscale: no tag v$ver in the submodule (git -C headscale fetch --tags?)" >&2; exit 1; }
+	go=$D/work/go/$gover/bin/go
+	if [ ! -x "$go" ]; then
+		echo "--- fetching go $gover"
+		mkdir -p "$D/work/go/$gover"
+		curl -sSfL "https://go.dev/dl/go$gover.linux-amd64.tar.gz" | tar xz -C "$D/work/go/$gover" --strip-components=1
+	fi
+	echo "--- headscale/$1: headscale $ver, linux/$2, go $gover"
+	rm -rf "$src" && mkdir -p "$out"
+	git -c init.defaultBranch=main clone -q --shared --no-checkout "$D/headscale" "$src"
+	git -C "$src" checkout -q "v$ver"
+	for p in "$D"/patches/headscale/*.patch; do patch -s -p1 -d "$src" < "$p"; done
+	(cd "$src" && env CGO_ENABLED=0 GOOS=linux GOARCH=$2 GOFLAGS=-mod=readonly "$go" build -trimpath \
+		-ldflags "-w -s" -o "$out/headscale" ./cmd/headscale)
+	(cd "$out" && sha256sum headscale | tee headscale.sha256); du -h "$out/headscale" | cut -f1
+	"$out/headscale" version | head -1
+}
+
+for t in ${@:-tailscale/armv6 tailscale/mipsle tailscale/amd64 headscale/amd64}; do
+	case $t in
+		tailscale/armv6)    build_tailscale armv6 arm GOARM=5 ;;
+		tailscale/mipsle)   build_tailscale mipsle mipsle GOMIPS=softfloat ;;
+		tailscale/amd64)    build_tailscale amd64 amd64 "" ;;
+		headscale/amd64)    build_headscale amd64 amd64 ;;
+		*) echo "unknown target: $t"; exit 1 ;;
+	esac
+done

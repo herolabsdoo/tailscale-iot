@@ -1,0 +1,81 @@
+diff --git a/hscontrol/mapper/batcher_test.go b/hscontrol/mapper/batcher_test.go
+index 49aeb54d..bbe49fb9 100644
+--- a/hscontrol/mapper/batcher_test.go
++++ b/hscontrol/mapper/batcher_test.go
+@@ -1068,8 +1068,9 @@ func TestBatcherWorkQueueBatching(t *testing.T) {
+ 						t.Logf("Update %d: nil update", updateCount)
+ 					}
+ 				case <-timeout:
+-					// Expected: 5 explicit changes + 1 initial from AddNode + 1 NodeOnline from wrapper = 7 updates
+-					expectedUpdates := 7
++					// Expected: 5 explicit changes + 1 initial from AddNode = 6 updates; the wrapper's
++					// NodeOnline is about the receiving node itself and is not sent (tailscale-iot).
++					expectedUpdates := 6
+ 					t.Logf("Received %d updates from %d changes (expected %d)",
+ 						updateCount, 5, expectedUpdates)
+ 
+diff --git a/hscontrol/mapper/mapper.go b/hscontrol/mapper/mapper.go
+index a9a43073..c18542cb 100644
+--- a/hscontrol/mapper/mapper.go
++++ b/hscontrol/mapper/mapper.go
+@@ -444,7 +444,19 @@ func (m *mapper) buildFromChange(
+ 		builder.WithPingRequest(resp.PingRequest)
+ 	}
+ 
+-	return builder.Build()
++	mapResp, err := builder.Build()
++	if err != nil {
++		return nil, err
++	}
++
++	// tailscale-iot: nothing visible to this node is left, send no frame (upstream sends ~300 B of ControlTime).
++	if !resp.SendAllPeers && !resp.IncludeSelf && !resp.IncludeDERPMap && !resp.IncludeDNS &&
++		!resp.IncludeDomain && !resp.IncludePolicy && resp.PingRequest == nil &&
++		len(mapResp.PeersChanged) == 0 && len(mapResp.PeersChangedPatch) == 0 && len(mapResp.PeersRemoved) == 0 {
++		return nil, nil //nolint:nilnil // nothing visible to this node, nothing to send
++	}
++
++	return mapResp, nil
+ }
+ 
+ // visiblePeerIDs returns the set of peer node IDs the recipient may see under
+diff --git a/hscontrol/mapper/mapper_test.go b/hscontrol/mapper/mapper_test.go
+index 9b19c949..bfca0406 100644
+--- a/hscontrol/mapper/mapper_test.go
++++ b/hscontrol/mapper/mapper_test.go
+@@ -257,15 +257,11 @@ func TestBuildFromChangeFiltersPeerPatchesByVisibility(t *testing.T) {
+ 	m := &mapper{state: s, cfg: cfg}
+ 
+ 	// n2 (user2) comes online; n1 (user1) must NOT receive its patch.
++	// tailscale-iot: nothing visible is left, so n1 gets no response at all.
+ 	leakChange := change.NodeOnline(n2.ID)
+ 	resp, err := m.buildFromChange(n1.ID, tailcfg.CurrentCapabilityVersion, &leakChange)
+ 	require.NoError(t, err)
+-	require.NotNil(t, resp)
+-
+-	for _, p := range resp.PeersChangedPatch {
+-		assert.NotEqual(t, n2.ID.NodeID(), p.NodeID,
+-			"n1 must not receive an online patch for n2, which its policy forbids accessing")
+-	}
++	require.Nil(t, resp, "n1 must not receive a frame about n2, which its policy forbids accessing")
+ 
+ 	// Control: n1b (same user) coming online IS visible to n1.
+ 	okChange := change.NodeOnline(n1b.ID)
+@@ -343,15 +339,11 @@ func TestBuildFromChangeFiltersUserProfilesByVisibility(t *testing.T) {
+ 
+ 	// n2 (user2) is added and broadcast. n1 (user1) cannot access it, so n1
+ 	// must NOT receive user2's profile.
++	// tailscale-iot: nothing visible is left, so n1 gets no response at all.
+ 	c := change.NodeAdded(n2.ID)
+ 	resp, err := m.buildFromChange(n1.ID, tailcfg.CurrentCapabilityVersion, &c)
+ 	require.NoError(t, err)
+-	require.NotNil(t, resp)
+-
+-	for _, up := range resp.UserProfiles {
+-		assert.NotEqual(t, user2.TailscaleUserProfile().ID, up.ID,
+-			"n1 must not receive user2's profile; n2 is not ACL-visible to n1")
+-	}
++	require.Nil(t, resp, "n1 must not receive a frame about n2; n2 is not ACL-visible to n1")
+ }
+ 
+ // TestBuildFromChangeVisibilityMatchesFullMap is the consolidation guard for

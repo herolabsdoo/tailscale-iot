@@ -1,0 +1,69 @@
+diff --git a/control/controlclient/direct.go b/control/controlclient/direct.go
+index 8ac6356..df7479a 100644
+--- a/control/controlclient/direct.go
++++ b/control/controlclient/direct.go
+@@ -1051,7 +1051,8 @@ type ControlTime struct {
+ // If we go more than watchdogTimeout without hearing from the server,
+ // end the long poll. We should be receiving a keep alive ping
+ // every minute.
+-const watchdogTimeout = 120 * time.Second
++// tailscale-iot: 5 min (was 2), a keepalive late on a loaded 2G bearer must not cost a new login.
++const watchdogTimeout = 300 * time.Second
+ 
+ // sendMapRequest makes a /map request to download the network map, calling cb
+ // with each new netmap. If isStreaming, it will poll forever and only returns
+diff --git a/derp/derphttp/derphttp_client.go b/derp/derphttp/derphttp_client.go
+index 7ba2198..bbde2c4 100644
+--- a/derp/derphttp/derphttp_client.go
++++ b/derp/derphttp/derphttp_client.go
+@@ -354,8 +354,8 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+ 
+ 	// timeout is the fallback maximum time (if ctx doesn't limit
+ 	// it further) to do all of: DNS + TCP + TLS + HTTP Upgrade +
+-	// DERP upgrade.
+-	const timeout = 10 * time.Second
++	// DERP upgrade. tailscale-iot: 90 s (was 10), a TLS handshake right after a 2G re-dial.
++	const timeout = 90 * time.Second
+ 	ctx, cancel := context.WithTimeout(ctx, timeout)
+ 	go func() {
+ 		select {
+@@ -726,7 +726,8 @@ func shouldDialProto(s string, pred func(netip.Addr) bool) bool {
+ 	return pred(ip)
+ }
+ 
+-const dialNodeTimeout = 1500 * time.Millisecond
++// tailscale-iot: 15 s (was 1.5), a 2G SYN round trip is 0.7-3.5 s.
++const dialNodeTimeout = 15 * time.Second
+ 
+ // dialNode returns a TCP connection to node n, racing IPv4 and IPv6
+ // (both as applicable) against each other.
+diff --git a/net/netcheck/netcheck.go b/net/netcheck/netcheck.go
+index a3f7fe3..51790b7 100644
+--- a/net/netcheck/netcheck.go
++++ b/net/netcheck/netcheck.go
+@@ -57,12 +57,13 @@
+ const (
+ 	// ReportTimeout is the maximum amount of time netcheck will
+ 	// spend gathering a single report.
+-	ReportTimeout = 5 * time.Second
++	// tailscale-iot: 30 s and 15 s (were 5 and 3), a STUN reply over 2G takes seconds.
++	ReportTimeout = 30 * time.Second
+ 	// stunTimeout is the maximum amount of time netcheck will spend
+ 	// probing with STUN packets without getting a reply before
+ 	// switching to HTTP probing, on the assumption that outbound UDP
+ 	// is blocked.
+-	stunProbeTimeout = 3 * time.Second
++	stunProbeTimeout = 15 * time.Second
+ 	// icmpProbeTimeout is the maximum amount of time netcheck will spend
+ 	// probing with ICMP packets.
+ 	icmpProbeTimeout = 1 * time.Second
+@@ -1336,7 +1337,8 @@ func (c *Client) timeNow() time.Time {
+ 	// re-probes every DERP region rather than only the home and fastest regions
+ 	// (see GetReport). It also informs retention window for report history
+ 	// (c.prev).
+-	fullReportInterval = 5 * time.Minute
++	// tailscale-iot: hourly (was 5 min), one DERP region.
++	fullReportInterval = time.Hour
+ 	// preferredDERPAbsoluteDiff specifies the minimum absolute difference
+ 	// in latencies between two DERP regions that would cause a node to
+ 	// switch its PreferredDERP ("home DERP"). This ensures that if a node

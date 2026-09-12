@@ -1,0 +1,36 @@
+diff --git a/hscontrol/app.go b/hscontrol/app.go
+index fc0869b0..22bb3698 100644
+--- a/hscontrol/app.go
++++ b/hscontrol/app.go
+@@ -839,17 +839,26 @@ func (h *Headscale) Serve() error {
+ 
+ 	var httpListener net.Listener
+ 
+-	if tlsConfig != nil {
+-		httpServer.TLSConfig = tlsConfig
+-		httpListener, err = tls.Listen("tcp", h.cfg.Addr, tlsConfig)
+-	} else {
+-		httpListener, err = new(net.ListenConfig).Listen(context.Background(), "tcp", h.cfg.Addr)
++	// tailscale-iot: keepalive idle 75 s (Go probes every 15 s); the map poll writes every 50-59 s anyway.
++	listenConfig := net.ListenConfig{
++		KeepAliveConfig: net.KeepAliveConfig{
++			Enable:   true,
++			Idle:     75 * time.Second,
++			Interval: 15 * time.Second,
++			Count:    3,
++		},
+ 	}
+ 
++	httpListener, err = listenConfig.Listen(context.Background(), "tcp", h.cfg.Addr)
+ 	if err != nil {
+ 		return fmt.Errorf("binding to TCP address: %w", err)
+ 	}
+ 
++	if tlsConfig != nil {
++		httpServer.TLSConfig = tlsConfig
++		httpListener = tls.NewListener(httpListener, tlsConfig)
++	}
++
+ 	errorGroup.Go(func() error { return httpServer.Serve(httpListener) })
+ 
+ 	log.Info().

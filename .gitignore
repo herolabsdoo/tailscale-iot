@@ -1,0 +1,2 @@
+# work/ = per-target copies of the pinned source with the patches applied, and headscale's Go (./build)
+work/

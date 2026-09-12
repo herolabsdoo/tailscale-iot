@@ -1,0 +1,50 @@
+# One release per version of this repo. Push the tag v<VERSION>; this runs ./build for every target
+# and puts the result on the release as <program>-v<upstream>_iot-v<VERSION>_<arch>.gz, each with a
+# .sha256 of the UNPACKED binary, plus the upstream licenses. A new patch set on the same upstream
+# version is a new VERSION here, so an asset name is never reused for different bytes.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: the tag must be v<VERSION>; the shallow submodules need their pinned tags
+        run: |
+          iot=$(cat VERSION)
+          [ "$GITHUB_REF_NAME" = "v$iot" ] || { echo "tag $GITHUB_REF_NAME, but VERSION is $iot"; exit 1; }
+          for p in tailscale headscale; do git -C "$p" fetch --depth 1 origin tag "v$(cat "targets/$p/VERSION")"; done
+      - name: build
+        run: ./build
+      - name: package
+        run: |
+          iot=$(cat VERSION); mkdir out
+          for p in tailscale headscale; do
+            case $p in tailscale) bin=tailscaled ;; headscale) bin=headscale ;; esac
+            build=v$(cat "targets/$p/VERSION")_iot-v$iot
+            for d in targets/$p/*/; do
+              arch=$(basename "$d"); [ -f "$d$bin" ] || continue
+              gzip -9c "$d$bin" > "out/$p-${build}_$arch.gz"
+              sha256sum "$d$bin" | cut -c1-64 > "out/$p-${build}_$arch.gz.sha256"
+            done
+            cp "$p/LICENSE" "out/LICENSE.$p"
+            [ ! -f "$p/PATENTS" ] || cp "$p/PATENTS" "out/PATENTS.$p"
+          done
+          cp LICENSE out/LICENSE
+          ls -l out
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ts=$(cat targets/tailscale/VERSION); hs=$(cat targets/headscale/VERSION)
+          title="iot v$(cat VERSION): tailscale $ts, headscale $hs"
+          notes="Upstream tailscale v$ts and headscale v$hs with patches/ applied by ./build at $GITHUB_SHA. Each .sha256 is of the unpacked binary. Licenses: LICENSE (this repository), LICENSE.tailscale, PATENTS.tailscale, LICENSE.headscale. Provided as is, without warranty of any kind."
+          gh release create "$GITHUB_REF_NAME" --title "$title" --notes "$notes" 2>/dev/null ||
+            gh release edit "$GITHUB_REF_NAME" --title "$title" --notes "$notes"
+          gh release upload "$GITHUB_REF_NAME" out/* --clobber

@@ -1,0 +1,37 @@
+diff --git a/net/netknob/netknob.go b/net/netknob/netknob.go
+index a870af8..f5802ea 100644
+--- a/net/netknob/netknob.go
++++ b/net/netknob/netknob.go
+@@ -25,5 +25,6 @@ func PlatformTCPKeepAlive() time.Duration {
+ 	// Otherwise, default to 30 seconds, which is mostly what we
+ 	// used to do. In some places we used the zero value, which Go
+ 	// defaults to 15 seconds. But 30 seconds is fine.
+-	return 30 * time.Second
++	// tailscale-iot: 60 s (was 30); control and DERP have application keepalives.
++	return 60 * time.Second
+ }
+diff --git a/net/tlsdial/tlsdial.go b/net/tlsdial/tlsdial.go
+index 417c925..09e153b 100644
+--- a/net/tlsdial/tlsdial.go
++++ b/net/tlsdial/tlsdial.go
+@@ -54,6 +54,9 @@
+ 	ImpactsConnectivity: true,
+ })
+ 
++// tailscale-iot: TLS session cache shared by every dial (control, DERP, netcheck).
++var sessionCache = tls.NewLRUClientSessionCache(16)
++
+ // Config returns a tls.Config for connecting to a server that
+ // uses system roots for validation but, if those fail, also tries
+ // the baked-in LetsEncrypt roots as a fallback validation method.
+@@ -79,6 +82,10 @@ func Config(ht *health.Tracker, base *tls.Config) *tls.Config {
+ 		conf = base.Clone()
+ 	}
+ 	conf.RootCAs = nil // we do our own verification in VerifyConnection
++	// tailscale-iot: resume sessions, a reconnect is ~1 kB instead of ~5 kB and one round trip shorter.
++	if conf.ClientSessionCache == nil {
++		conf.ClientSessionCache = sessionCache
++	}
+ 
+ 	// Note: we do NOT set conf.ServerName here (as we accidentally did
+ 	// previously), as this path is also used when dialing an HTTPS proxy server
