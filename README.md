@@ -8,7 +8,9 @@ Static Linux binaries for `armv6`, `mipsle` and `amd64` are published on the
 [Releases](../../releases) page. Every release is built from a tag of this repository by the
 included GitHub Actions workflow, from pinned upstream sources plus the patches in `patches/`.
 This repository contains the build definition and the patches only; it carries no deployment
-configuration.
+configuration. A second workflow packages a release as a container image and pushes it to a
+registry, but only from coordinates supplied per GitHub environment — see
+[Pushing that image to a registry](#pushing-that-image-to-a-registry).
 
 ## Motivation
 
@@ -122,6 +124,21 @@ COPY headscale /ko-app/headscale
 `/ko-app/headscale` is the binary and entrypoint of the official distroless image. Rolling back
 means returning to the stock image tag.
 
+### Pushing that image to a registry
+
+The `headscale image` workflow builds exactly the above and pushes it, run by hand from the
+Actions tab. Two choices: the **branch**, whose `VERSION` decides which release is packaged (the
+`release` input overrides it), and the **environment**, which decides where it lands. The asset is
+downloaded from the release and checked against its `.sha256` before the build, and the image tag,
+the asset name and the base image tag are all derived from the release itself, so packaging an
+older release cannot pick up a newer upstream pin. The image is tagged with the release's build
+string, e.g. `v0.29.3_iot-v1.0`.
+
+Each GitHub environment carries one variable, `AWS_GITHUB_OIDC_ROLE_ARN`: the role assumed via
+OIDC, which needs the ECR pull and push actions on the target repository. The
+run stops on its first step if it is missing.Tags are expected to be immutable: a tag that already exists
+is reported and left alone, never rebuilt. The pushed image is then used in [moohero-infra repo](https://github.com/herolabsdoo/moohero-infra/tree/master/deploys/vpn_headscale/config).
+
 Patch 002 configures keepalive on headscale's own listener, so headscale must terminate the
 client TCP connections itself; a TCP-terminating proxy in front of it would negate the patch. There
 is no configuration-only substitute for patch 001: `tuning.batch_change_delay` delays empty frames
@@ -137,7 +154,7 @@ patches/tailscale/      client patches and their documentation
 patches/headscale/      control-server patches and their documentation
 build                   build script
 targets/<program>/      VERSION (upstream pin) and one output directory per architecture (ignored)
-.github/workflows/      release.yml
+.github/workflows/      release.yml (tag -> binaries), image.yml (manual -> container image)
 ```
 
 ## License

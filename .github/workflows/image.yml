@@ -1,0 +1,109 @@
+name: headscale image
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to push to"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - prod
+      release:
+        description: "Release tag to package. Empty means the tag matching VERSION on this branch."
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  push:
+    name: Push to ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    permissions:
+      contents: read    # to download the release asset
+      id-token: write   # to assume the push role
+    steps:
+      - uses: actions/checkout@v4   # the VERSION file only, so no submodules
+
+      - name: Resolve the release, the asset and the image tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_INPUT: ${{ inputs.release }}
+          ROLE_ARN: ${{ vars.AWS_GITHUB_OIDC_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "the ${{ inputs.target }} environment has no AWS_GITHUB_OIDC_ROLE_ARN variable" >&2
+            exit 1
+          fi
+
+          release=${RELEASE_INPUT:-v$(cat VERSION)}
+
+          # Everything is derived from the asset's own name rather than from the VERSION files
+          # on this branch, so packaging an older release cannot pick up a newer upstream pin.
+          assets=$(gh release view "$release" --json assets \
+            --jq '.assets[].name | select(test("^headscale-.*_amd64\\.gz$"))')
+          count=$(echo "$assets" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "release $release has $count headscale amd64 assets, expected exactly 1" >&2
+            echo "$assets" >&2
+            exit 1
+          fi
+
+          # headscale-v0.29.3_iot-v1.0_amd64.gz -> tag v0.29.3_iot-v1.0, base image v0.29.3
+          tag=${assets#headscale-}
+          tag=${tag%_amd64.gz}
+          {
+            echo "RELEASE=$release"
+            echo "ASSET=$assets"
+            echo "IMAGE_TAG=$tag"
+            echo "BASE_TAG=${tag%%_iot-*}"
+            echo "REPOSITORY=moohero-${{ inputs.target }}-tailscale-iot"
+          } >> "$GITHUB_ENV"
+
+      - name: Download the asset and verify its checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir image && cd image
+          gh release download "$RELEASE" -p "$ASSET" -p "$ASSET.sha256"
+          gunzip -c "$ASSET" > headscale
+          echo "$(cat "$ASSET.sha256")  headscale" | sha256sum -c -
+          chmod +x headscale   # gzip -c does not carry the mode, and this file is the entrypoint
+          rm "$ASSET" "$ASSET.sha256"
+          # /ko-app/headscale is both the binary and the entrypoint of the official image
+          printf 'FROM docker.io/headscale/headscale:%s\nCOPY headscale /ko-app/headscale\n' \
+            "$BASE_TAG" > Dockerfile
+          cat Dockerfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_GITHUB_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
+          role-session-name: github-headscale-image
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      # REGISTRY is the account behind the assumed role, so it needs no configuring either.
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          # batch-get-image, not describe-images: the push role is scoped to the pull and push
+          # actions only. A missing tag comes back as an empty images list, not an error. Tags
+          # are immutable in ECR, so an already published tag must be a no-op, not a conflict.
+          digest=$(aws ecr batch-get-image --repository-name "$REPOSITORY" \
+            --image-ids "imageTag=$IMAGE_TAG" --query 'images[0].imageId.imageDigest' --output text)
+          if [ -n "$digest" ] && [ "$digest" != "None" ]; then
+            echo "$REPOSITORY:$IMAGE_TAG is already published ($digest)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          docker build --pull --platform linux/amd64 -t "$REGISTRY/$REPOSITORY:$IMAGE_TAG" image
+          docker push "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+          echo "pushed \`$REGISTRY/$REPOSITORY:$IMAGE_TAG\` from release $RELEASE" >> "$GITHUB_STEP_SUMMARY"
