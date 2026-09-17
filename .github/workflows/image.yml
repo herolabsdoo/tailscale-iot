@@ -81,6 +81,15 @@ jobs:
             "$BASE_TAG" > Dockerfile
           cat Dockerfile
 
+      - name: Print the OIDC claims this run presents
+        run: |
+          token=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          payload=$(echo "$token" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in 2) payload="$payload==" ;; 3) payload="$payload=" ;; esac
+          echo "$payload" | base64 -d |
+            jq '{sub, aud, repository, repository_owner, repository_id, repository_owner_id}'
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_GITHUB_OIDC_ROLE_ARN }}
